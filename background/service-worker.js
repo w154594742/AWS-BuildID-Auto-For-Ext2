@@ -38,6 +38,9 @@ let proxyEnabled = false; // 是否启用代理提取
 let proxyManualList = []; // 手动代理列表（解析后）
 let proxyManualRaw = '';  // 手动代理原始文本
 let proxyRotateIndex = 0; // 轮换索引
+let proxyUsageLimit = 1;  // 单个代理使用次数上限
+let proxyUsageCount = 0;  // 当前代理已使用次数
+let proxyDeadSet = new Set(); // 全局不可用代理集合（跨会话持久化）
 
 // MoeMail 配置
 let moemailApiUrl = 'https://';  // API 地址
@@ -134,17 +137,31 @@ function parseProxyList(raw) {
 }
 
 /**
- * 获取下一个轮换代理（跳过已标记不可用的）
+ * 获取下一个轮换代理（跳过已标记不可用的，支持单代理多次使用）
  * @param {Set} deadSet - 已标记不可用的代理 key 集合
  */
 function getNextProxy(deadSet) {
   if (proxyManualList.length === 0) return null;
   const total = proxyManualList.length;
+
+  // 当前代理未用满次数，继续使用
+  if (proxyUsageCount < proxyUsageLimit && proxyRotateIndex > 0) {
+    const currentIdx = (proxyRotateIndex - 1) % total;
+    const proxy = proxyManualList[currentIdx];
+    const key = `${proxy.scheme}://${proxy.host}:${proxy.port}`;
+    if (!deadSet || !deadSet.has(key)) {
+      proxyUsageCount++;
+      return proxy;
+    }
+  }
+
+  // 轮换到下一个可用代理
   for (let i = 0; i < total; i++) {
     const proxy = proxyManualList[proxyRotateIndex % total];
     proxyRotateIndex++;
     const key = `${proxy.scheme}://${proxy.host}:${proxy.port}`;
     if (deadSet && deadSet.has(key)) continue;
+    proxyUsageCount = 1;
     return proxy;
   }
   return null;
@@ -199,6 +216,33 @@ function applyProxyToIncognito(proxy) {
 function clearIncognitoProxy() {
   chrome.proxy.settings.clear({ scope: 'incognito_session_only' });
   console.log('[Service Worker] 已清除无痕代理');
+}
+
+/**
+ * 标记代理为不可用（持久化）
+ */
+function markProxyDead(proxyKey) {
+  proxyDeadSet.add(proxyKey);
+  chrome.storage.local.set({ proxyDeadList: [...proxyDeadSet] });
+  broadcastState();
+}
+
+/**
+ * 从不可用列表中移除单个代理
+ */
+function reviveProxy(proxyKey) {
+  proxyDeadSet.delete(proxyKey);
+  chrome.storage.local.set({ proxyDeadList: [...proxyDeadSet] });
+  broadcastState();
+}
+
+/**
+ * 清空所有不可用代理
+ */
+function clearDeadProxies() {
+  proxyDeadSet.clear();
+  chrome.storage.local.set({ proxyDeadList: [] });
+  broadcastState();
 }
 
 // ============== 全局状态 ==============
@@ -515,7 +559,6 @@ async function runSessionRegistration(session) {
     // 步骤 5: 打开无痕窗口 → 设置代理 → 加载页面（支持代理失败重试）
     const maxProxyRetries = useProxy ? 3 : 1;
     let pageLoaded = false;
-    const deadProxies = new Set(); // 跨重试轮次共享，避免重复使用不可用代理
 
     for (let retryRound = 0; retryRound < maxProxyRetries; retryRound++) {
       if (retryRound > 0) {
@@ -587,7 +630,7 @@ async function runSessionRegistration(session) {
         ];
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          pendingProxy = getNextProxy(deadProxies);
+          pendingProxy = getNextProxy(proxyDeadSet);
           if (!pendingProxy) break;
 
           const proxyKey = `${pendingProxy.scheme}://${pendingProxy.host}:${pendingProxy.port}`;
@@ -627,12 +670,12 @@ async function runSessionRegistration(session) {
             break;
           } else {
             console.warn(`[Session ${session.id}] 代理不可用: ${proxyKey}，跳过`);
-            deadProxies.add(proxyKey);
+            markProxyDead(proxyKey);
           }
         }
 
         if (!proxyConnected) {
-          console.warn(`[Session ${session.id}] 所有代理均不可用 (${deadProxies.size} 个)，切换为直连模式`);
+          console.warn(`[Session ${session.id}] 所有代理均不可用 (${proxyDeadSet.size} 个)，切换为直连模式`);
           pendingProxy = null;
           clearIncognitoProxy();
         }
@@ -664,7 +707,7 @@ async function runSessionRegistration(session) {
       if (loadTimeout && useProxy && retryRound < maxProxyRetries - 1) {
         if (pendingProxy) {
           const failedKey = `${pendingProxy.scheme}://${pendingProxy.host}:${pendingProxy.port}`;
-          deadProxies.add(failedKey);
+          markProxyDead(failedKey);
           console.warn(`[Session ${session.id}] 页面加载超时，标记代理 ${failedKey} 不可用，将更换代理重试`);
         }
         continue;
@@ -1360,12 +1403,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         chrome.storage.local.set({ proxyManualRaw });
         console.log('[Service Worker] 解析手动代理列表:', proxyManualList.length, '个');
       }
-      console.log('[Service Worker] 设置代理配置:', { proxyApiUrl, proxyEnabled, manualCount: proxyManualList.length });
+      if (message.usageLimit !== undefined) {
+        proxyUsageLimit = Math.max(1, parseInt(message.usageLimit) || 1);
+        proxyUsageCount = 0;
+        chrome.storage.local.set({ proxyUsageLimit });
+        console.log('[Service Worker] 设置单代理使用次数:', proxyUsageLimit);
+      }
+      console.log('[Service Worker] 设置代理配置:', { proxyApiUrl, proxyEnabled, manualCount: proxyManualList.length, usageLimit: proxyUsageLimit });
       sendResponse({ success: true, parsedCount: proxyManualList.length });
       break;
 
     case 'GET_PROXY_CONFIG':
-      sendResponse({ proxyApiUrl, proxyApiKey, proxyEnabled, proxyManualRaw, parsedCount: proxyManualList.length });
+      sendResponse({ proxyApiUrl, proxyApiKey, proxyEnabled, proxyManualRaw, parsedCount: proxyManualList.length, proxyUsageLimit, deadProxies: [...proxyDeadSet] });
+      break;
+
+    case 'REVIVE_PROXY':
+      reviveProxy(message.proxyKey);
+      console.log('[Service Worker] 恢复代理:', message.proxyKey);
+      sendResponse({ success: true, deadProxies: [...proxyDeadSet] });
+      break;
+
+    case 'CLEAR_DEAD_PROXIES':
+      clearDeadProxies();
+      console.log('[Service Worker] 已清空所有不可用代理');
+      sendResponse({ success: true });
       break;
 
     case 'TEST_PROXY_API':
@@ -1675,7 +1736,7 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // 恢复历史记录、Gmail API 配置和邮箱渠道
-chrome.storage.local.get(['registrationHistory', 'gmailApiAuthorized', 'gmailSenderFilter', 'mailProvider', 'gptmailApiKey', 'duckMailApiKey', 'duckMailDomain', 'moemailApiUrl', 'moemailApiKey', 'moemailDomain', 'moemailPrefix', 'moemailRandomLength', 'moemailDuration', 'denyAccess', 'proxyApiUrl', 'proxyApiKey', 'proxyEnabled', 'proxyManualRaw']).then((stored) => {
+chrome.storage.local.get(['registrationHistory', 'gmailApiAuthorized', 'gmailSenderFilter', 'mailProvider', 'gptmailApiKey', 'duckMailApiKey', 'duckMailDomain', 'moemailApiUrl', 'moemailApiKey', 'moemailDomain', 'moemailPrefix', 'moemailRandomLength', 'moemailDuration', 'denyAccess', 'proxyApiUrl', 'proxyApiKey', 'proxyEnabled', 'proxyManualRaw', 'proxyUsageLimit', 'proxyDeadList']).then((stored) => {
   if (stored.registrationHistory) {
     registrationHistory = stored.registrationHistory;
     console.log('[Service Worker] 恢复历史记录:', registrationHistory.length, '条');
@@ -1751,6 +1812,16 @@ chrome.storage.local.get(['registrationHistory', 'gmailApiAuthorized', 'gmailSen
     proxyManualRaw = stored.proxyManualRaw;
     proxyManualList = parseProxyList(proxyManualRaw);
     console.log('[Service Worker] 恢复手动代理列表:', proxyManualList.length, '个');
+  }
+  if (stored.proxyUsageLimit !== undefined) {
+    proxyUsageLimit = Math.max(1, parseInt(stored.proxyUsageLimit) || 1);
+    console.log('[Service Worker] 恢复单代理使用次数:', proxyUsageLimit);
+  }
+  if (stored.proxyDeadList && Array.isArray(stored.proxyDeadList)) {
+    proxyDeadSet = new Set(stored.proxyDeadList);
+    if (proxyDeadSet.size > 0) {
+      console.log('[Service Worker] 恢复不可用代理:', proxyDeadSet.size, '个');
+    }
   }
 
   // 恢复 Gmail API 配置
