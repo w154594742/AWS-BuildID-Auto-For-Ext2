@@ -166,6 +166,27 @@
           </label>
         </div>
       </div>
+      <div class="settings-row" style="margin-top: 8px;">
+        <div class="setting-item" style="flex: 1;">
+          <label>
+            <input type="checkbox" id="proxy-enabled-toggle"> 启用代理提取
+          </label>
+        </div>
+      </div>
+      <div id="proxy-config-panel" style="display: none; margin-top: 6px;">
+        <div class="gmail-input-row">
+          <textarea id="proxy-manual-list" placeholder="手动代理列表（每行一个）&#10;格式: socks5://ip:port&#10;http://user:pass@ip:port&#10;ip:port" class="gmail-input" style="flex: 1; min-height: 60px; resize: vertical; font-size: 11px;"></textarea>
+        </div>
+        <p id="proxy-parsed-count" class="provider-desc" style="margin-top: 2px; font-size: 11px;"></p>
+        <div class="gmail-input-row" style="margin-top: 4px;">
+          <input type="text" id="proxy-api-url" placeholder="代理提取 API 地址（可选）" class="gmail-input" style="flex: 1;">
+        </div>
+        <div class="gmail-input-row" style="margin-top: 4px;">
+          <input type="text" id="proxy-api-key" placeholder="API Key（可选）" class="gmail-input" style="flex: 1;">
+          <button id="proxy-test-btn" class="gmail-btn">测试</button>
+        </div>
+        <p id="proxy-status" class="provider-desc" style="margin-top: 4px;"></p>
+      </div>
     </div>
 
     <!-- 操作按钮区域 -->

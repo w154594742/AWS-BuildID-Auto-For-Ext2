@@ -1629,6 +1629,73 @@ async function init() {
     chrome.runtime.sendMessage({ type: 'SET_DENY_ACCESS', value: denyAccessToggle.checked });
   });
 
+  // 代理配置
+  const proxyEnabledToggle = document.getElementById('proxy-enabled-toggle');
+  const proxyConfigPanel = document.getElementById('proxy-config-panel');
+  const proxyManualListInput = document.getElementById('proxy-manual-list');
+  const proxyParsedCount = document.getElementById('proxy-parsed-count');
+  const proxyApiUrlInput = document.getElementById('proxy-api-url');
+  const proxyApiKeyInput = document.getElementById('proxy-api-key');
+  const proxyTestBtn = document.getElementById('proxy-test-btn');
+  const proxyStatus = document.getElementById('proxy-status');
+
+  chrome.runtime.sendMessage({ type: 'GET_PROXY_CONFIG' }).then(res => {
+    if (res) {
+      proxyEnabledToggle.checked = res.proxyEnabled;
+      proxyApiUrlInput.value = res.proxyApiUrl || '';
+      proxyApiKeyInput.value = res.proxyApiKey || '';
+      proxyManualListInput.value = res.proxyManualRaw || '';
+      proxyConfigPanel.style.display = res.proxyEnabled ? 'block' : 'none';
+      if (res.parsedCount > 0) {
+        proxyParsedCount.textContent = `已解析 ${res.parsedCount} 个代理`;
+        proxyParsedCount.style.color = 'green';
+      }
+    }
+  }).catch(() => {});
+
+  proxyEnabledToggle.addEventListener('change', () => {
+    const enabled = proxyEnabledToggle.checked;
+    proxyConfigPanel.style.display = enabled ? 'block' : 'none';
+    chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', enabled });
+  });
+
+  proxyManualListInput.addEventListener('blur', async () => {
+    const res = await chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', manualRaw: proxyManualListInput.value });
+    if (res?.parsedCount !== undefined) {
+      proxyParsedCount.textContent = res.parsedCount > 0 ? `已解析 ${res.parsedCount} 个代理` : '未检测到有效代理';
+      proxyParsedCount.style.color = res.parsedCount > 0 ? 'green' : 'red';
+    }
+  });
+
+  proxyApiUrlInput.addEventListener('blur', () => {
+    chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', apiUrl: proxyApiUrlInput.value });
+  });
+  proxyApiKeyInput.addEventListener('blur', () => {
+    chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', apiKey: proxyApiKeyInput.value });
+  });
+
+  proxyTestBtn.addEventListener('click', async () => {
+    proxyStatus.textContent = '测试中...';
+    proxyStatus.style.color = '#666';
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'TEST_PROXY_API',
+        apiUrl: proxyApiUrlInput.value,
+        apiKey: proxyApiKeyInput.value
+      });
+      if (res?.success) {
+        proxyStatus.textContent = '连接成功: ' + (typeof res.data === 'string' ? res.data.substring(0, 50) : JSON.stringify(res.data).substring(0, 50));
+        proxyStatus.style.color = 'green';
+      } else {
+        proxyStatus.textContent = '失败: ' + (res?.error || '未知错误');
+        proxyStatus.style.color = 'red';
+      }
+    } catch (e) {
+      proxyStatus.textContent = '失败: ' + e.message;
+      proxyStatus.style.color = 'red';
+    }
+  });
+
   // 绑定复制按钮事件
   document.querySelectorAll('.copy-btn').forEach(btn => {
     btn.addEventListener('click', () => {
